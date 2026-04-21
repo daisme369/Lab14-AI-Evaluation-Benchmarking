@@ -30,6 +30,11 @@ class BenchmarkRunner:
             answer = str(response)
             response = {"answer": answer}
 
+        retrieved_ids = response.get("retrieved_ids", []) if isinstance(response, dict) else []
+        case_metadata = test_case.get("metadata", {})
+        response_metadata = response.get("metadata", {}) if isinstance(response, dict) else {}
+        agent_tokens = int(response_metadata.get("tokens_used", 0) or 0)
+
         # 2. Retrieval / RAGAS
         ragas_scores = await self.evaluator.score(
             test_case,
@@ -47,8 +52,15 @@ class BenchmarkRunner:
 
         return {
             "test_case": test_case["question"],
+            "case_id": case_metadata.get("case_id"),
+            "metadata": case_metadata,
             "agent_response": answer,
+            "retrieved_ids": retrieved_ids,
+            "expected_retrieval_ids": test_case.get("expected_retrieval_ids", []),
             "latency": round(latency, 3),
+            "token_usage": {
+                "agent_tokens": agent_tokens,
+            },
             "ragas": ragas_scores,
             "judge": judge_result,
             "status": "fail" if final_score < 3 else "pass"
@@ -87,8 +99,15 @@ class BenchmarkRunner:
 
         return {
             "test_case": test_case.get("question", ""),
+            "case_id": (test_case.get("metadata") or {}).get("case_id"),
+            "metadata": test_case.get("metadata", {}),
             "agent_response": "",
+            "retrieved_ids": [],
+            "expected_retrieval_ids": test_case.get("expected_retrieval_ids", []),
             "latency": 0,
+            "token_usage": {
+                "agent_tokens": 0,
+            },
             "ragas": {},
             "judge": {
                 "final_score": 0,

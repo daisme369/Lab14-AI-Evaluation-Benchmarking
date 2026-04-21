@@ -114,7 +114,7 @@ async def _quick_test() -> None:
 
     batch_result = await evaluator.evaluate_batch(sample_dataset)
     assert batch_result["total_cases"] == 3
-    assert abs(batch_result["avg_hit_rate"] - (1.0 / 3.0)) < 1e-9
+    assert abs(batch_result["avg_hit_rate"] - (2.0 / 3.0)) < 1e-9
     assert abs(batch_result["avg_mrr"] - ((1.0 + (1.0 / 3.0) + 0.0) / 3.0)) < 1e-9
     assert len(batch_result["per_case_metrics"]) == 3
 

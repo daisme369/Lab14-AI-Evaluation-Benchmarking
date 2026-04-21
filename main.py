@@ -69,7 +69,7 @@ def _has_non_empty_env(name: str) -> bool:
 def _default_live_judge_enabled() -> bool:
     if os.getenv("USE_LIVE_JUDGE") is not None:
         return _env_bool("USE_LIVE_JUDGE", False)
-    return _has_non_empty_env("GEMINI_API_KEY") and _has_non_empty_env("GROQ_API_KEY")
+    return _has_non_empty_env("GROQ_API_KEY")
 
 
 def _tokenize(text: str) -> List[str]:
@@ -130,10 +130,11 @@ class MultiModelJudgeAdapter:
         self.live_judge: Optional[Any] = None
         self.backend = "fallback"
         self.init_error: Optional[str] = None
+        self.provider_availability: Dict[str, bool] = {"groq_model_a": False, "groq_model_b": False}
 
         if use_live_judge:
-            if not _has_non_empty_env("GEMINI_API_KEY") or not _has_non_empty_env("GROQ_API_KEY"):
-                self.init_error = "Missing GEMINI_API_KEY or GROQ_API_KEY"
+            if not _has_non_empty_env("GROQ_API_KEY"):
+                self.init_error = "Missing GROQ_API_KEY"
                 print(f"[WARN] Live judge disabled: {self.init_error}")
                 return
 
@@ -141,7 +142,16 @@ class MultiModelJudgeAdapter:
                 from engine.llm_judge import LLMJudge
 
                 self.live_judge = LLMJudge()
-                self.backend = "live"
+                self.provider_availability = {
+                    "groq_model_a": bool(getattr(self.live_judge, "has_model_a", False)),
+                    "groq_model_b": bool(getattr(self.live_judge, "has_model_b", False)),
+                }
+                if any(self.provider_availability.values()):
+                    self.backend = "live"
+                else:
+                    self.live_judge = None
+                    self.backend = "fallback"
+                    self.init_error = "Live judge initialized without active providers"
             except Exception as exc:
                 self.init_error = str(exc)
                 print(f"[WARN] Live judge disabled due to initialization error: {exc}")
@@ -155,7 +165,8 @@ class MultiModelJudgeAdapter:
         if self.live_judge is not None:
             try:
                 result = await self.live_judge.evaluate_multi_judge(question, answer, ground_truth)
-                result["judge_backend"] = "live"
+                live_provider_count = int(result.get("live_provider_count", 0) or 0)
+                result["judge_backend"] = "live" if live_provider_count > 0 else "fallback"
                 return result
             except Exception as exc:
                 print(f"[WARN] Live judge call failed. Fallback activated: {exc}")
@@ -203,6 +214,9 @@ def summarize_results(
     elapsed_seconds: float,
     batch_size: int,
 ) -> Dict[str, Any]:
+    agent_cost_per_1k_tokens = _env_float("AGENT_COST_PER_1K_TOKENS_USD", 0.0)
+    judge_cost_per_case = _env_float("JUDGE_COST_PER_CASE_USD", 0.0)
+
     total = len(results)
     if total == 0:
         return {
@@ -224,6 +238,9 @@ def summarize_results(
                 "error_rate": 0.0,
                 "fallback_judge_rate": 0.0,
                 "live_judge_rate": 0.0,
+                "total_tokens": 0,
+                "estimated_total_cost_usd": 0.0,
+                "estimated_cost_per_eval_usd": 0.0,
             },
             "breakdown": {},
         }
@@ -233,6 +250,7 @@ def summarize_results(
     mrr_values = [float(((row.get("ragas") or {}).get("retrieval") or {}).get("mrr", 0.0)) for row in results]
     agreement_rates = [float((row.get("judge") or {}).get("agreement_rate", 0.0)) for row in results]
     latencies = [float(row.get("latency", 0.0)) for row in results]
+    total_tokens = sum(int((row.get("token_usage") or {}).get("agent_tokens", 0) or 0) for row in results)
     fallback_count = sum(1 for row in results if (row.get("judge") or {}).get("judge_backend") == "fallback")
     live_count = sum(1 for row in results if (row.get("judge") or {}).get("judge_backend") == "live")
 
@@ -241,6 +259,9 @@ def summarize_results(
     sorted_latencies = sorted(latencies)
     p95_index = int(round(0.95 * (len(sorted_latencies) - 1))) if sorted_latencies else 0
     p95_latency = sorted_latencies[p95_index] if sorted_latencies else 0.0
+    token_cost = (total_tokens / 1000.0) * agent_cost_per_1k_tokens
+    estimated_total_cost = token_cost + (total * judge_cost_per_case)
+    estimated_cost_per_eval = (estimated_total_cost / total) if total else 0.0
 
     breakdown: Dict[str, Dict[str, int]] = {}
     for row in results:
@@ -273,6 +294,9 @@ def summarize_results(
             "error_rate": round(error_count / total, 4),
             "fallback_judge_rate": round(fallback_count / total, 4),
             "live_judge_rate": round(live_count / total, 4),
+            "total_tokens": total_tokens,
+            "estimated_total_cost_usd": round(estimated_total_cost, 6),
+            "estimated_cost_per_eval_usd": round(estimated_cost_per_eval, 6),
         },
         "breakdown": breakdown,
     }
@@ -403,6 +427,13 @@ async def main() -> None:
         print("[WARN] Live judge was requested but unavailable. Falling back to local lexical judge.")
         if baseline_judge.init_error:
             print(f"[WARN] Live judge init error: {baseline_judge.init_error}")
+
+    if args.use_live_judge and baseline_judge.backend == "live":
+        providers = baseline_judge.provider_availability
+        print(
+            f"[INFO] Live judge providers: groq_model_a={'on' if providers.get('groq_model_a') else 'off'}, "
+            f"groq_model_b={'on' if providers.get('groq_model_b') else 'off'}."
+        )
 
     print(f"[INFO] Judge backend baseline={baseline_judge.backend}, candidate={candidate_judge.backend}.")
 
