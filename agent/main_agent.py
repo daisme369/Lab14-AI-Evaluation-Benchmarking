@@ -1,5 +1,10 @@
 import asyncio
-from typing import List, Dict
+import json
+import math
+import os
+import re
+from collections import Counter, defaultdict
+from typing import Dict, List
 
 class MainAgent:
     """
@@ -8,58 +13,115 @@ class MainAgent:
     """
     def __init__(self):
         self.name = "SupportAgent-v1"
+        self.top_k = 3
+        self.corpus_path = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), "..", "data", "golden_set.jsonl")
+        )
+        self.doc_store = self._build_document_store()
+        self.doc_embeddings = {
+            doc_id: self._embed(content["text"])
+            for doc_id, content in self.doc_store.items()
+        }
 
-    def _select_doc_ids(self, question: str) -> List[str]:
-        q = question.lower()
+    def _tokenize(self, text: str) -> List[str]:
+        return re.findall(r"[a-zA-Z0-9_]+", text.lower())
 
-        doc_ids: List[str] = []
+    def _embed(self, text: str) -> Counter:
+        return Counter(self._tokenize(text))
 
-        if "mrr" in q or "hit rate" in q or "retrieval" in q:
-            doc_ids.append("doc_retrieval_metrics")
-        if "faithfulness" in q or "hallucination" in q:
-            doc_ids.append("doc_ragas_faithfulness")
-        if "relevancy" in q:
-            doc_ids.append("doc_ragas_relevancy")
-        if "judge" in q or "agreement" in q or "cohen" in q:
-            doc_ids.append("doc_multi_judge")
-        if "position bias" in q:
-            doc_ids.append("doc_position_bias")
-        if "async" in q or "batch" in q or "rate limit" in q:
-            doc_ids.append("doc_async_runner")
-        if "chi phi" in q or "token" in q or "cost" in q:
-            doc_ids.append("doc_cost_tracking")
-        if "release gate" in q or "deploy" in q or "regression" in q:
-            doc_ids.append("doc_release_gate")
-        if "5 whys" in q or "failure" in q:
-            doc_ids.append("doc_failure_analysis")
-        if "mơ hồ" in q or "mo ho" in q or "làm rõ" in q or "lam ro" in q:
-            doc_ids.append("doc_ambiguity")
-        if "xung dot" in q or "mâu thuẫn" in q or "mau thuan" in q:
-            doc_ids.append("doc_conflict_resolution")
-        if "chunk" in q:
-            doc_ids.append("doc_chunking")
-        if "prompt injection" in q or "bo qua" in q or "giả vờ" in q or "gia vo" in q:
-            doc_ids.append("doc_prompt_injection")
-        if "không biết" in q or "khong biet" in q or "không có" in q or "khong co" in q:
-            doc_ids.append("doc_ooc_policy")
+    def _cosine_similarity(self, vec_a: Counter, vec_b: Counter) -> float:
+        if not vec_a or not vec_b:
+            return 0.0
 
-        if not doc_ids:
-            doc_ids = ["doc_eval_intro", "doc_ooc_policy", "doc_ambiguity"]
+        if len(vec_a) > len(vec_b):
+            vec_a, vec_b = vec_b, vec_a
 
-        # Giữ unique và chỉ lấy top-3 giống pipeline retrieval thực tế.
-        unique_doc_ids = list(dict.fromkeys(doc_ids))
-        return unique_doc_ids[:3]
+        dot_product = sum(value * vec_b.get(token, 0) for token, value in vec_a.items())
+        norm_a = math.sqrt(sum(value * value for value in vec_a.values()))
+        norm_b = math.sqrt(sum(value * value for value in vec_b.values()))
 
-    def _mock_retrieve(self, question: str) -> Dict[str, List[str]]:
-        """Giả lập tầng retrieval để trả về doc ids có thứ tự xếp hạng."""
-        retrieved_ids = self._select_doc_ids(question)
+        if norm_a == 0.0 or norm_b == 0.0:
+            return 0.0
+        return dot_product / (norm_a * norm_b)
+
+    def _extract_doc_snippets(self, context: str) -> Dict[str, str]:
+        matches = list(re.finditer(r"\[(doc_[^\]]+)\]\s*", context))
+        if not matches:
+            return {}
+
+        snippets: Dict[str, List[str]] = defaultdict(list)
+        for idx, match in enumerate(matches):
+            doc_id = match.group(1)
+            start = match.end()
+            end = matches[idx + 1].start() if idx + 1 < len(matches) else len(context)
+            chunk = context[start:end].strip()
+            if chunk:
+                snippets[doc_id].append(chunk)
+
+        return {doc_id: " ".join(parts) for doc_id, parts in snippets.items()}
+
+    def _build_document_store(self) -> Dict[str, Dict[str, str]]:
+        document_chunks: Dict[str, List[str]] = defaultdict(list)
+
+        if os.path.exists(self.corpus_path):
+            with open(self.corpus_path, "r", encoding="utf-8") as file:
+                for line in file:
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    case = json.loads(line)
+                    context = case.get("context", "")
+                    expected_ids = case.get("expected_retrieval_ids", [])
+
+                    snippet_map = self._extract_doc_snippets(context)
+                    if expected_ids:
+                        for doc_id in expected_ids:
+                            if doc_id in snippet_map:
+                                document_chunks[doc_id].append(snippet_map[doc_id])
+                            elif context:
+                                document_chunks[doc_id].append(context)
+                    else:
+                        for doc_id, snippet in snippet_map.items():
+                            document_chunks[doc_id].append(snippet)
+
+        doc_store: Dict[str, Dict[str, str]] = {}
+        for doc_id, chunks in document_chunks.items():
+            unique_chunks = list(dict.fromkeys(chunk.strip() for chunk in chunks if chunk.strip()))
+            if not unique_chunks:
+                continue
+            doc_store[doc_id] = {
+                "text": " ".join(unique_chunks),
+                "source": f"{doc_id}.txt",
+            }
+
+        if not doc_store:
+            doc_store = {
+                "doc_eval_intro": {
+                    "text": "AI evaluation tracks retrieval quality, answer quality, cost, and latency.",
+                    "source": "doc_eval_intro.txt",
+                }
+            }
+
+        return doc_store
+
+    def _retrieve_top_k(self, question: str) -> Dict[str, List[str]]:
+        query_embedding = self._embed(question)
+        ranked_docs = []
+
+        for doc_id, doc_embedding in self.doc_embeddings.items():
+            score = self._cosine_similarity(query_embedding, doc_embedding)
+            ranked_docs.append((doc_id, score))
+
+        ranked_docs.sort(key=lambda item: item[1], reverse=True)
+        top_docs = ranked_docs[: self.top_k]
+
+        retrieved_ids = [doc_id for doc_id, _ in top_docs]
+        contexts = [self.doc_store[doc_id]["text"] for doc_id in retrieved_ids]
+
         return {
             "retrieved_ids": retrieved_ids,
-            "contexts": [
-                "Ngữ cảnh mô phỏng cho doc id đầu tiên.",
-                "Ngữ cảnh mô phỏng cho doc id thứ hai.",
-                "Ngữ cảnh mô phỏng cho doc id thứ ba."
-            ],
+            "contexts": contexts,
             "sources": [f"{doc_id}.txt" for doc_id in retrieved_ids],
         }
 
@@ -72,7 +134,7 @@ class MainAgent:
         # Giả lập độ trễ mạng/LLM
         await asyncio.sleep(0.5)
 
-        retrieval = self._mock_retrieve(question)
+        retrieval = self._retrieve_top_k(question)
 
         # Giả lập dữ liệu trả về
         return {
