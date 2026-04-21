@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import json
 import os
@@ -68,7 +69,7 @@ def _has_non_empty_env(name: str) -> bool:
 def _default_live_judge_enabled() -> bool:
     if os.getenv("USE_LIVE_JUDGE") is not None:
         return _env_bool("USE_LIVE_JUDGE", False)
-    return _has_non_empty_env("OPENAI_API_KEY") and _has_non_empty_env("GEMINI_API_KEY")
+    return _has_non_empty_env("GEMINI_API_KEY") and _has_non_empty_env("GROQ_API_KEY")
 
 
 def _tokenize(text: str) -> List[str]:
@@ -131,8 +132,8 @@ class MultiModelJudgeAdapter:
         self.init_error: Optional[str] = None
 
         if use_live_judge:
-            if not _has_non_empty_env("OPENAI_API_KEY") or not _has_non_empty_env("GEMINI_API_KEY"):
-                self.init_error = "Missing OPENAI_API_KEY or GEMINI_API_KEY"
+            if not _has_non_empty_env("GEMINI_API_KEY") or not _has_non_empty_env("GROQ_API_KEY"):
+                self.init_error = "Missing GEMINI_API_KEY or GROQ_API_KEY"
                 print(f"[WARN] Live judge disabled: {self.init_error}")
                 return
 
@@ -190,8 +191,6 @@ def load_dataset(dataset_path: str) -> List[Dict[str, Any]]:
         raise ValueError(f"Dataset {dataset_path} is empty.")
 
     return dataset
-    runner = BenchmarkRunner(MainAgent(), ExpertEvaluator(), LLMJudge())
-    results = await runner.run_all(dataset)
 
 
 def _average(values: List[float]) -> float:
@@ -372,7 +371,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reports-dir", default="reports")
     parser.add_argument("--batch-size", type=int, default=_env_int("BENCHMARK_BATCH_SIZE", 5))
     parser.add_argument("--retrieval-top-k", type=int, default=_env_int("RETRIEVAL_TOP_K", 3))
-    parser.add_argument("--use-live-judge", action=argparse.BooleanOptionalAction, default=_default_live_judge_enabled(), help="Enable/disable live OpenAI+Gemini judges.")
+    parser.add_argument("--use-live-judge", action=argparse.BooleanOptionalAction, default=_default_live_judge_enabled(), help="Enable/disable live Gemini+Groq judges.")
     parser.add_argument("--baseline-version", default=os.getenv("BASELINE_VERSION", "Agent_V1_Base"))
     parser.add_argument("--candidate-version", default=os.getenv("CANDIDATE_VERSION", "Agent_V2_Optimized"))
     parser.add_argument("--min-avg-score", type=float, default=_env_float("GATE_MIN_AVG_SCORE", 3.0))

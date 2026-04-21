@@ -105,11 +105,11 @@ class BenchmarkRunner:
     async def run_all(
         self,
         dataset: List[Dict],
-        batch_size: int = 1
+        batch_size: int = 5
     ) -> List[Dict]:
         """
         Stable mode:
-        - default batch_size = 1 tránh Groq RPM limit
+        - default batch_size = 5
         - sleep giữa batch
         """
 
