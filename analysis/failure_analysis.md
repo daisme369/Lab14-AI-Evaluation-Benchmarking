@@ -2,12 +2,12 @@
 
 ## 1. Tổng quan Benchmark
 - **Tổng số cases:** 52 (Dataset sinh ra từ `synthetic_gen.py`)
-- **Tỉ lệ Pass/Fail:** X/Y (Dựa trên lần chạy 10 cases thử nghiệm: Pass Rate đạt 100%, tuy nhiên vẫn có nhiều trường hợp điểm thấp ở ranh giới 3.0 - 3.5)
+- **Tỉ lệ Pass/Fail:** 44/8 (Tương đương Pass Rate 84.62%)
 - **Điểm RAGAS trung bình:**
-    - Hit Rate: 0.60
-    - Định vị trung bình (MRR): 0.53 
-- **Điểm LLM-Judge trung bình:** 4.2 / 5.0
-- **Agreement Rate:** ~87.5%
+    - Hit Rate: 0.67
+    - Định vị trung bình (MRR): 0.58 
+- **Điểm LLM-Judge trung bình:** 3.46 / 5.0
+- **Agreement Rate:** 91.8%
 
 ## 2. Phân nhóm lỗi (Failure Clustering)
 | Nhóm lỗi | Số lượng (Dự kiến) | Nguyên nhân dự kiến |
