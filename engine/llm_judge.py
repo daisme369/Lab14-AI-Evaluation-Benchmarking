@@ -4,7 +4,8 @@ import json
 import statistics
 from typing import Dict, Any, List
 import openai
-import google.generativeai as genai
+from google import genai
+from google.genai import types as genai_types
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -18,8 +19,8 @@ class LLMJudge:
         
         # Setup Gemini
         gemini_key = gemini_api_key or os.getenv("GEMINI_API_KEY")
-        genai.configure(api_key=gemini_key)
-        self.gemini_model = genai.GenerativeModel("gemini-2.5-flash")
+        self.gemini_client = genai.Client(api_key=gemini_key)
+        self.gemini_model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
         self.rubrics = {
             "accuracy": """Chấm từ 1-5: Độ chính xác của thông tin so với Ground Truth.
@@ -75,18 +76,18 @@ Ground Truth: {ground_truth}
                 return json.loads(response.choices[0].message.content)
             
             elif "gemini" in judge_name.lower():
-                # Gemini 2.5 Flash logic
                 full_prompt = f"{system_prompt}\n\n{user_content}"
-                response = await self.gemini_model.generate_content_async(
-                    full_prompt,
-                    generation_config=genai.types.GenerationConfig(
-                        candidate_count=1,
-                        stop_sequences=[],
+                response = await self.gemini_client.aio.models.generate_content(
+                    model=self.gemini_model_name,
+                    contents=full_prompt,
+                    config=genai_types.GenerateContentConfig(
                         max_output_tokens=1000,
                         temperature=0.1,
-                        response_mime_type="application/json"
-                    )
+                        response_mime_type="application/json",
+                    ),
                 )
+                if not response.text:
+                    raise ValueError("Gemini returned empty text response")
                 return json.loads(response.text)
             
             else:
