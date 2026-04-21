@@ -5,11 +5,34 @@ import os
 import re
 import statistics
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent.main_agent import MainAgent
 from engine.retrieval_eval import RetrievalEvaluator
 from engine.runner import BenchmarkRunner
+
+
+def _load_local_env(env_path: Optional[str] = None) -> None:
+    candidate_path = Path(env_path) if env_path else Path(__file__).resolve().parent / ".env"
+    if not candidate_path.exists():
+        return
+
+    with candidate_path.open("r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+_load_local_env()
 
 
 def _env_int(name: str, default: int) -> int:

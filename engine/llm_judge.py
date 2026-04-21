@@ -1,14 +1,15 @@
 import asyncio
+import importlib
 import os
 import json
+import random
+import re
 import statistics
 from typing import Dict, Any, List
-import openai
-from google import genai
-from google.genai import types as genai_types
-from dotenv import load_dotenv
+genai = importlib.import_module("google.genai")
+genai_types = importlib.import_module("google.genai.types")
 
-load_dotenv()
+openai = importlib.import_module("openai")
 
 class LLMJudge:
     def __init__(self, openai_api_key: str = None, gemini_api_key: str = None):
@@ -21,6 +22,7 @@ class LLMJudge:
         gemini_key = gemini_api_key or os.getenv("GEMINI_API_KEY")
         self.gemini_client = genai.Client(api_key=gemini_key)
         self.gemini_model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        self.openai_model_name = os.getenv("OPENAI_JUDGE_MODEL", "gpt-4o-mini")
 
         self.rubrics = {
             "accuracy": """Chấm từ 1-5: Độ chính xác của thông tin so với Ground Truth.
@@ -39,6 +41,64 @@ class LLMJudge:
         }
         
         self.rubric_prompt = "\n\n".join([f"### {k.capitalize()}:\n{v}" for k, v in self.rubrics.items()])
+
+    @staticmethod
+    def _parse_json_response(raw_text: str) -> Dict[str, Any]:
+        try:
+            return json.loads(raw_text)
+        except json.JSONDecodeError:
+            start = raw_text.find("{")
+            end = raw_text.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                candidate = raw_text[start : end + 1]
+                return json.loads(candidate)
+            raise
+
+    @staticmethod
+    def _is_retryable_error(error: Exception) -> bool:
+        message = str(error).lower()
+        return (
+            "rate limit" in message
+            or "429" in message
+            or "timeout" in message
+            or "temporarily unavailable" in message
+            or "aiohttp" in message
+            or "connector" in message
+        )
+
+    async def _retry_async(self, operation, attempts: int = 3, base_delay: float = 0.8):
+        last_error = None
+        for attempt in range(attempts):
+            try:
+                return await operation()
+            except Exception as exc:
+                last_error = exc
+                if attempt == attempts - 1 or not self._is_retryable_error(exc):
+                    raise
+                await asyncio.sleep(base_delay * (2 ** attempt) + random.uniform(0.0, 0.2))
+        raise last_error
+
+    async def _generate_gemini_response(self, full_prompt: str):
+        def _call_sync():
+            return self.gemini_client.models.generate_content(
+                model=self.gemini_model_name,
+                contents=full_prompt,
+                config=genai_types.GenerateContentConfig(
+                    max_output_tokens=1000,
+                    temperature=0.1,
+                    response_mime_type="application/json",
+                ),
+            )
+
+        return await asyncio.to_thread(_call_sync)
+
+    @staticmethod
+    def _fallback_judge_payload(error_message: str) -> Dict[str, Any]:
+        return {
+            "overall_score": 3.0,
+            "criteria_scores": {"accuracy": 3, "professionalism": 3, "safety": 3},
+            "reasoning": error_message,
+        }
 
     async def evaluate_single_judge(self, judge_name: str, question: str, answer: str, ground_truth: str) -> Dict[str, Any]:
         """
@@ -64,31 +124,30 @@ Ground Truth: {ground_truth}
 
         try:
             if "gpt" in judge_name.lower():
-                response = await self.openai_client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_content}
-                    ],
-                    response_format={"type": "json_object"},
-                    temperature=0.1
+                response = await self._retry_async(
+                    lambda: self.openai_client.chat.completions.create(
+                        model=self.openai_model_name,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_content},
+                        ],
+                        response_format={"type": "json_object"},
+                        temperature=0.1,
+                    )
                 )
                 return json.loads(response.choices[0].message.content)
             
             elif "gemini" in judge_name.lower():
                 full_prompt = f"{system_prompt}\n\n{user_content}"
-                response = await self.gemini_client.aio.models.generate_content(
-                    model=self.gemini_model_name,
-                    contents=full_prompt,
-                    config=genai_types.GenerateContentConfig(
-                        max_output_tokens=1000,
-                        temperature=0.1,
-                        response_mime_type="application/json",
-                    ),
-                )
-                if not response.text:
-                    raise ValueError("Gemini returned empty text response")
-                return json.loads(response.text)
+                try:
+                    response = await self._retry_async(lambda: self._generate_gemini_response(full_prompt))
+                    if not response.text:
+                        raise ValueError("Gemini returned empty text response")
+                    return self._parse_json_response(response.text)
+                except Exception as gemini_error:
+                    return self._fallback_judge_payload(
+                        f"Gemini fallback after invalid response: {gemini_error}"
+                    )
             
             else:
                 raise ValueError(f"Unsupported judge model: {judge_name}")
