@@ -1,4 +1,3 @@
-import argparse
 import asyncio
 import json
 import os
@@ -191,6 +190,8 @@ def load_dataset(dataset_path: str) -> List[Dict[str, Any]]:
         raise ValueError(f"Dataset {dataset_path} is empty.")
 
     return dataset
+    runner = BenchmarkRunner(MainAgent(), ExpertEvaluator(), LLMJudge())
+    results = await runner.run_all(dataset)
 
 
 def _average(values: List[float]) -> float:

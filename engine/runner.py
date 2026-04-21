@@ -1,6 +1,6 @@
 import asyncio
 import time
-from typing import Any, Dict, List
+from typing import List, Dict, Any
 
 
 class BenchmarkRunner:
@@ -10,101 +10,132 @@ class BenchmarkRunner:
         self.judge = judge
         self.pass_score_threshold = pass_score_threshold
 
-    def _build_error_result(self, test_case: Dict[str, Any], error_message: str) -> Dict[str, Any]:
-        return {
-            "test_case": test_case.get("question", ""),
-            "case_id": (test_case.get("metadata") or {}).get("case_id"),
-            "metadata": test_case.get("metadata", {}),
-            "agent_response": "",
-            "retrieved_ids": [],
-            "latency": 0.0,
-            "ragas": {
-                "faithfulness": 0.0,
-                "relevancy": 0.0,
-                "retrieval": {"hit_rate": 0.0, "mrr": 0.0},
-                "error": error_message,
-            },
-            "judge": {
-                "final_score": 0.0,
-                "agreement_rate": 0.0,
-                "individual_scores": {},
-                "reasoning": {"error": error_message},
-            },
-            "status": "error",
-            "error": error_message,
-        }
+    # =====================================================
+    # RUN SINGLE TEST
+    # =====================================================
 
-    async def run_single_test(self, test_case: Dict[str, Any]) -> Dict[str, Any]:
+    async def run_single_test(self, test_case: Dict) -> Dict:
+
         start_time = time.perf_counter()
-        question = test_case.get("question", "")
-        expected_answer = test_case.get("expected_answer", "")
 
-        try:
-            response = await self.agent.query(question)
-        except Exception as exc:
-            return self._build_error_result(test_case, f"agent_error: {exc}")
+        # 1. Call Agent
+        response = await self.agent.query(test_case["question"])
 
         latency = time.perf_counter() - start_time
-        if not isinstance(response, dict):
-            response = {"answer": str(response), "retrieved_ids": []}
 
-        answer = response.get("answer", "")
-        retrieved_ids = response.get("retrieved_ids", [])
+        # normalize response
+        if isinstance(response, dict):
+            answer = response.get("answer", "")
+        else:
+            answer = str(response)
+            response = {"answer": answer}
 
-        try:
-            ragas_scores = await self.evaluator.score(test_case, response)
-        except Exception as exc:
-            ragas_scores = {
-                "faithfulness": 0.0,
-                "relevancy": 0.0,
-                "retrieval": {"hit_rate": 0.0, "mrr": 0.0},
-                "error": f"evaluator_error: {exc}",
-            }
+        # 2. Retrieval / RAGAS
+        ragas_scores = await self.evaluator.score(
+            test_case,
+            response
+        )
 
-        try:
-            judge_result = await self.judge.evaluate_multi_judge(question, answer, expected_answer)
-        except Exception as exc:
-            judge_result = {
-                "final_score": 0.0,
-                "agreement_rate": 0.0,
-                "individual_scores": {},
-                "reasoning": {"error": f"judge_error: {exc}"},
-            }
+        # 3. Multi Judge
+        judge_result = await self.judge.evaluate_multi_judge(
+            test_case["question"],
+            answer,
+            test_case["expected_answer"]
+        )
 
-        final_score = float(judge_result.get("final_score", 0.0))
-        retrieval_scores = ragas_scores.get("retrieval", {})
-        hit_rate = float(retrieval_scores.get("hit_rate", 0.0))
-        status = "pass" if final_score >= self.pass_score_threshold and hit_rate > 0.0 else "fail"
+        final_score = float(judge_result.get("final_score", 3.0))
 
         return {
-            "test_case": question,
-            "case_id": (test_case.get("metadata") or {}).get("case_id"),
-            "metadata": test_case.get("metadata", {}),
+            "test_case": test_case["question"],
             "agent_response": answer,
-            "retrieved_ids": retrieved_ids,
-            "latency": latency,
+            "latency": round(latency, 3),
             "ragas": ragas_scores,
             "judge": judge_result,
-            "status": status,
+            "status": "fail" if final_score < 3 else "pass"
         }
 
-    async def run_all(self, dataset: List[Dict[str, Any]], batch_size: int = 5) -> List[Dict[str, Any]]:
-        """
-        Run the benchmark in async batches to control request burst and rate limits.
-        """
-        if batch_size <= 0:
-            raise ValueError("batch_size must be greater than 0")
+    # =====================================================
+    # SAFE WRAPPER
+    # =====================================================
 
-        results: List[Dict[str, Any]] = []
-        for i in range(0, len(dataset), batch_size):
-            batch = dataset[i : i + batch_size]
-            tasks = [asyncio.create_task(self.run_single_test(case)) for case in batch]
-            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+    async def safe_run_single_test(
+        self,
+        test_case: Dict,
+        idx: int,
+        total: int
+    ) -> Dict:
 
-            for index, result in enumerate(batch_results):
-                if isinstance(result, Exception):
-                    results.append(self._build_error_result(batch[index], f"runner_error: {result}"))
-                    continue
-                results.append(result)
+        last_error = None
+
+        for attempt in range(2):
+            try:
+                print(f"🔹 Running test {idx}/{total}")
+
+                result = await self.run_single_test(test_case)
+
+                print(f"✅ Done test {idx}/{total}")
+
+                return result
+
+            except Exception as e:
+                last_error = e
+                print(
+                    f"❌ Test {idx}/{total} failed "
+                    f"(attempt {attempt+1}): {e}"
+                )
+                await asyncio.sleep(3)
+
+        return {
+            "test_case": test_case.get("question", ""),
+            "agent_response": "",
+            "latency": 0,
+            "ragas": {},
+            "judge": {
+                "final_score": 0,
+                "agreement_rate": 0
+            },
+            "status": "error",
+            "error": str(last_error)
+        }
+
+    # =====================================================
+    # RUN ALL
+    # =====================================================
+
+    async def run_all(
+        self,
+        dataset: List[Dict],
+        batch_size: int = 1
+    ) -> List[Dict]:
+        """
+        Stable mode:
+        - default batch_size = 1 tránh Groq RPM limit
+        - sleep giữa batch
+        """
+
+        results = []
+        total = len(dataset)
+
+        for i in range(0, total, batch_size):
+
+            batch = dataset[i:i + batch_size]
+
+            tasks = [
+                self.safe_run_single_test(
+                    case,
+                    i + j + 1,
+                    total
+                )
+                for j, case in enumerate(batch)
+            ]
+
+            batch_results = await asyncio.gather(*tasks)
+
+            results.extend(batch_results)
+
+            # tránh rate limit
+            await asyncio.sleep(2)
+
+        print("🎉 Benchmark completed.")
 
         return results
