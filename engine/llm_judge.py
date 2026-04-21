@@ -23,6 +23,10 @@ class LLMJudge:
         self.gemini_client = genai.Client(api_key=gemini_key)
         self.gemini_model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
         self.openai_model_name = os.getenv("OPENAI_JUDGE_MODEL", "gpt-4o-mini")
+        self.openai_concurrency = max(1, int(os.getenv("OPENAI_JUDGE_CONCURRENCY", "1")))
+        self.gemini_concurrency = max(1, int(os.getenv("GEMINI_JUDGE_CONCURRENCY", "1")))
+        self.openai_semaphore = asyncio.Semaphore(self.openai_concurrency)
+        self.gemini_semaphore = asyncio.Semaphore(self.gemini_concurrency)
 
         self.rubrics = {
             "accuracy": """Chấm từ 1-5: Độ chính xác của thông tin so với Ground Truth.
@@ -124,23 +128,29 @@ Ground Truth: {ground_truth}
 
         try:
             if "gpt" in judge_name.lower():
-                response = await self._retry_async(
-                    lambda: self.openai_client.chat.completions.create(
-                        model=self.openai_model_name,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_content},
-                        ],
-                        response_format={"type": "json_object"},
-                        temperature=0.1,
-                    )
-                )
+                async def _openai_call():
+                    async with self.openai_semaphore:
+                        return await self.openai_client.chat.completions.create(
+                            model=self.openai_model_name,
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_content},
+                            ],
+                            response_format={"type": "json_object"},
+                            temperature=0.1,
+                        )
+
+                response = await self._retry_async(_openai_call)
                 return json.loads(response.choices[0].message.content)
             
             elif "gemini" in judge_name.lower():
                 full_prompt = f"{system_prompt}\n\n{user_content}"
                 try:
-                    response = await self._retry_async(lambda: self._generate_gemini_response(full_prompt))
+                    async def _gemini_call():
+                        async with self.gemini_semaphore:
+                            return await self._generate_gemini_response(full_prompt)
+
+                    response = await self._retry_async(_gemini_call)
                     if not response.text:
                         raise ValueError("Gemini returned empty text response")
                     return self._parse_json_response(response.text)
