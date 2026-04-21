@@ -1,9 +1,64 @@
-from typing import List, Dict
+from typing import Dict, List
 import asyncio
+import re
 
 class RetrievalEvaluator:
-    def __init__(self):
-        pass
+    def __init__(self, top_k: int = 3):
+        self.top_k = top_k
+
+    @staticmethod
+    def _lexical_overlap(answer: str, expected_answer: str) -> float:
+        answer_tokens = set(re.findall(r"[a-z0-9_]+", (answer or "").lower()))
+        expected_tokens = set(re.findall(r"[a-z0-9_]+", (expected_answer or "").lower()))
+        if not expected_tokens:
+            return 0.0
+        return len(answer_tokens.intersection(expected_tokens)) / len(expected_tokens)
+
+    @staticmethod
+    def _extract_retrieved_ids(response: Dict) -> List[str]:
+        if not isinstance(response, dict):
+            return []
+
+        retrieved_ids = response.get("retrieved_ids")
+        if isinstance(retrieved_ids, list):
+            return [str(doc_id) for doc_id in retrieved_ids]
+
+        metadata = response.get("metadata", {})
+        sources = metadata.get("sources") if isinstance(metadata, dict) else None
+        if isinstance(sources, list):
+            return [str(doc_id) for doc_id in sources]
+        return []
+
+    async def score(self, case: Dict, response: Dict) -> Dict:
+        expected_ids = [str(doc_id) for doc_id in case.get("expected_retrieval_ids", [])]
+        retrieved_ids = self._extract_retrieved_ids(response)
+
+        hit_rate = self.calculate_hit_rate(
+            expected_ids=expected_ids,
+            retrieved_ids=retrieved_ids,
+            top_k=self.top_k,
+        )
+        mrr = self.calculate_mrr(expected_ids=expected_ids, retrieved_ids=retrieved_ids)
+
+        overlap = self._lexical_overlap(
+            answer=response.get("answer", ""),
+            expected_answer=case.get("expected_answer", ""),
+        )
+
+        faithfulness = min(1.0, max(0.0, 0.25 + 0.5 * overlap + 0.25 * hit_rate))
+        relevancy = min(1.0, max(0.0, 0.3 + 0.5 * overlap + 0.2 * hit_rate))
+
+        return {
+            "faithfulness": round(faithfulness, 4),
+            "relevancy": round(relevancy, 4),
+            "retrieval": {
+                "hit_rate": round(hit_rate, 4),
+                "mrr": round(mrr, 4),
+                "top_k": self.top_k,
+                "retrieved_ids": retrieved_ids,
+                "expected_ids": expected_ids,
+            },
+        }
 
     def calculate_hit_rate(self, expected_ids: List[str], retrieved_ids: List[str], top_k: int = 3) -> float:
         """

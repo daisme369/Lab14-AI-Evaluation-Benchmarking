@@ -1,26 +1,31 @@
 import asyncio
 import os
 import json
+import re
 import statistics
 from typing import Dict, Any, List
 import openai
-from google import genai
-from google.genai import types as genai_types
+try:
+    import google.generativeai as genai
+except ImportError:  # pragma: no cover - optional dependency
+    genai = None
 from dotenv import load_dotenv
 
 load_dotenv()
 
 class LLMJudge:
     def __init__(self, openai_api_key: str = None, gemini_api_key: str = None):
-        # Setup OpenAI
-        self.openai_client = openai.AsyncOpenAI(
-            api_key=openai_api_key or os.getenv("OPENAI_API_KEY")
-        )
+        self.openai_client = None
+        openai_key = openai_api_key or os.getenv("OPENAI_API_KEY")
+        if openai_key:
+            self.openai_client = openai.AsyncOpenAI(api_key=openai_key)
         
-        # Setup Gemini
+        self.gemini_model = None
+        self.disable_gemini = False
         gemini_key = gemini_api_key or os.getenv("GEMINI_API_KEY")
-        self.gemini_client = genai.Client(api_key=gemini_key)
-        self.gemini_model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        if genai is not None and gemini_key:
+            genai.configure(api_key=gemini_key)
+            self.gemini_model = genai.GenerativeModel("gemini-2.5-flash")
 
         self.rubrics = {
             "accuracy": """Chấm từ 1-5: Độ chính xác của thông tin so với Ground Truth.
@@ -39,6 +44,27 @@ class LLMJudge:
         }
         
         self.rubric_prompt = "\n\n".join([f"### {k.capitalize()}:\n{v}" for k, v in self.rubrics.items()])
+
+    @staticmethod
+    def _fallback_evaluation(question: str, answer: str, ground_truth: str, reason: str) -> Dict[str, Any]:
+        answer_tokens = set(re.findall(r"[a-z0-9_]+", (answer or "").lower()))
+        gt_tokens = set(re.findall(r"[a-z0-9_]+", (ground_truth or "").lower()))
+        overlap = (len(answer_tokens.intersection(gt_tokens)) / len(gt_tokens)) if gt_tokens else 0.0
+
+        overall = round(1.0 + 4.0 * overlap, 2)
+        criteria_score = max(1, min(5, int(round(overall))))
+        return {
+            "overall_score": overall,
+            "criteria_scores": {
+                "accuracy": criteria_score,
+                "professionalism": 4,
+                "safety": 5,
+            },
+            "reasoning": (
+                f"Fallback judge used ({reason}). "
+                f"Điểm dựa trên lexical overlap giữa answer và ground truth cho câu hỏi: {question[:80]}"
+            ),
+        }
 
     async def evaluate_single_judge(self, judge_name: str, question: str, answer: str, ground_truth: str) -> Dict[str, Any]:
         """
@@ -64,6 +90,8 @@ Ground Truth: {ground_truth}
 
         try:
             if "gpt" in judge_name.lower():
+                if self.openai_client is None:
+                    return self._fallback_evaluation(question, answer, ground_truth, "missing_openai_key")
                 response = await self.openai_client.chat.completions.create(
                     model="gpt-4o",
                     messages=[
@@ -76,31 +104,40 @@ Ground Truth: {ground_truth}
                 return json.loads(response.choices[0].message.content)
             
             elif "gemini" in judge_name.lower():
+                if self.disable_gemini:
+                    return self._fallback_evaluation(question, answer, ground_truth, "gemini_disabled_after_error")
+                if self.gemini_model is None or genai is None:
+                    return self._fallback_evaluation(question, answer, ground_truth, "missing_gemini_key_or_package")
+                # Gemini 2.5 Flash logic
                 full_prompt = f"{system_prompt}\n\n{user_content}"
-                response = await self.gemini_client.aio.models.generate_content(
-                    model=self.gemini_model_name,
-                    contents=full_prompt,
-                    config=genai_types.GenerateContentConfig(
+                response = await self.gemini_model.generate_content_async(
+                    full_prompt,
+                    generation_config=genai.types.GenerationConfig(
+                        candidate_count=1,
+                        stop_sequences=[],
                         max_output_tokens=1000,
                         temperature=0.1,
-                        response_mime_type="application/json",
-                    ),
+                        response_mime_type="application/json"
+                    )
                 )
-                if not response.text:
-                    raise ValueError("Gemini returned empty text response")
                 return json.loads(response.text)
             
             else:
                 raise ValueError(f"Unsupported judge model: {judge_name}")
                 
         except Exception as e:
-            print(f"Error calling {judge_name}: {e}")
-            # Fallback score if API fails
-            return {
-                "overall_score": 3.0,
-                "criteria_scores": {"accuracy": 3, "professionalism": 3, "safety": 3},
-                "reasoning": f"Error occurred: {str(e)}"
-            }
+            error_text = str(e)
+            print(f"Error calling {judge_name}: {error_text}")
+            lower_error = error_text.lower()
+
+            reason = "api_error"
+            if "gemini" in judge_name.lower() and ("429" in error_text or "quota" in lower_error):
+                self.disable_gemini = True
+                reason = "gemini_quota_exceeded"
+            elif "gpt" in judge_name.lower() and ("401" in error_text or "unauthorized" in lower_error):
+                reason = "openai_auth_error"
+
+            return self._fallback_evaluation(question, answer, ground_truth, reason)
 
     async def evaluate_multi_judge(self, question: str, answer: str, ground_truth: str) -> Dict[str, Any]:
         """
