@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import json
 import os
 import time
@@ -6,30 +6,61 @@ from engine.runner import BenchmarkRunner
 from agent.main_agent import MainAgent
 from engine.retrieval_eval import RetrievalEvaluator
 
+
 # Giả lập các components Expert
 class ExpertEvaluator:
     def __init__(self):
-        self.retrival_evaluator = RetrievalEvaluator()
-    
-    async def score(self, case, resp): 
-        # Giả lập tính toán Hit Rate và MRR
+        self.retrieval_evaluator = RetrievalEvaluator()
+
+    def _extract_retrieved_ids(self, response):
+        metadata = response.get("metadata", {}) if isinstance(response, dict) else {}
+
+        # Ưu tiên dùng retrieved_ids nếu agent trả về sẵn.
+        retrieved_ids = response.get("retrieved_ids", []) if isinstance(response, dict) else []
+        if isinstance(retrieved_ids, list) and retrieved_ids:
+            return [str(doc_id) for doc_id in retrieved_ids]
+
+        # Fallback dùng sources trong metadata.
+        sources = metadata.get("sources", []) if isinstance(metadata, dict) else []
+        if isinstance(sources, list):
+            return [str(source) for source in sources]
+
+        return []
+
+    async def score(self, case, resp):
+        expected_ids = case.get("expected_retrieval_ids", []) if isinstance(case, dict) else []
+        retrieved_ids = self._extract_retrieved_ids(resp)
+
+        hit_rate = self.retrieval_evaluator.calculate_hit_rate(
+            expected_ids=expected_ids,
+            retrieved_ids=retrieved_ids,
+            top_k=3,
+        )
+        mrr = self.retrieval_evaluator.calculate_mrr(
+            expected_ids=expected_ids,
+            retrieved_ids=retrieved_ids,
+        )
 
         return {
-            "faithfulness": 0.9, 
+            "faithfulness": 0.9,
             "relevancy": 0.8,
             "retrieval": {
-                "hit_rate": self.retrival_evaluator.calculate_hit_rate(case.get("expected_retrieval_ids", []), resp.get("retrieved_ids", [])),
-                "mrr": self.retrival_evaluator.calculate_mrr(case.get("expected_retrieval_ids", []), resp.get("retrieved_ids", []))
-            }
+                "hit_rate": hit_rate,
+                "mrr": mrr,
+                "expected_ids": expected_ids,
+                "retrieved_ids": retrieved_ids,
+            },
         }
 
+
 class MultiModelJudge:
-    async def evaluate_multi_judge(self, q, a, gt): 
+    async def evaluate_multi_judge(self, q, a, gt):
         return {
-            "final_score": 4.5, 
+            "final_score": 4.5,
             "agreement_rate": 0.8,
-            "reasoning": "Cả 2 model đồng ý đây là câu trả lời tốt."
+            "reasoning": "Cả 2 model đồng ý đây là câu trả lời tốt.",
         }
+
 
 async def run_benchmark_with_results(agent_version: str):
     print(f"🚀 Khởi động Benchmark cho {agent_version}...")
@@ -43,32 +74,38 @@ async def run_benchmark_with_results(agent_version: str):
 
     if not dataset:
         print("❌ File data/golden_set.jsonl rỗng. Hãy tạo ít nhất 1 test case.")
-        return None, None 
+        return None, None
 
     runner = BenchmarkRunner(MainAgent(), ExpertEvaluator(), MultiModelJudge())
     results = await runner.run_all(dataset)
 
     total = len(results)
     summary = {
-        "metadata": {"version": agent_version, "total": total, "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")},
+        "metadata": {
+            "version": agent_version,
+            "total": total,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        },
         "metrics": {
             "avg_score": sum(r["judge"]["final_score"] for r in results) / total,
             "hit_rate": sum(r["ragas"]["retrieval"]["hit_rate"] for r in results) / total,
-            "agreement_rate": sum(r["judge"]["agreement_rate"] for r in results) / total
-        }
+            "agreement_rate": sum(r["judge"]["agreement_rate"] for r in results) / total,
+        },
     }
     return results, summary
+
 
 async def run_benchmark(version):
     _, summary = await run_benchmark_with_results(version)
     return summary
 
+
 async def main():
     v1_summary = await run_benchmark("Agent_V1_Base")
-    
+
     # Giả lập V2 có cải tiến (để test logic)
     v2_results, v2_summary = await run_benchmark_with_results("Agent_V2_Optimized")
-    
+
     if not v1_summary or not v2_summary:
         print("❌ Không thể chạy Benchmark. Kiểm tra lại data/golden_set.jsonl.")
         return
@@ -89,6 +126,7 @@ async def main():
         print("✅ QUYẾT ĐỊNH: CHẤP NHẬN BẢN CẬP NHẬT (APPROVE)")
     else:
         print("❌ QUYẾT ĐỊNH: TỪ CHỐI (BLOCK RELEASE)")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
