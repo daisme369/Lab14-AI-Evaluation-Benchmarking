@@ -1,6 +1,6 @@
 # Báo cáo Cá nhân (Individual Reflection)
 
-- **Họ và tên:** Nguyễn Tuấn Hưng
+- **Họ và tên:** Nguyễn Tuấn Hưng - 2A202600230
 - **Lab:** Day 14 — AI Evaluation Factory
 - **Ngày nộp:** 2026-04-21
 - **Repository:** https://github.com/daisme369/Lab14-AI-Evaluation-Benchmarking.git
